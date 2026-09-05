@@ -1,0 +1,97 @@
+name: Linux AppImage
+
+# Standalone Linux-only pipeline. build_check.yml -> build.yml also fires
+# Windows and macOS jobs on every push; this one does not.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore: [ "*.md" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/dependencies/vcpkg"
+  # Local filesystem cache instead of the owner-scoped NuGet feed upstream
+  # uses -- no packages: write token needed, and actions/cache persists it.
+  VCPKG_BINARY_SOURCES: "clear;default,readwrite"
+  VCPKG_DEFAULT_BINARY_CACHE: "${{ github.workspace }}/vcpkg-archives"
+
+jobs:
+  appimage:
+    # Single job: building and packaging in one place removes the
+    # cross-job artifact handoff that upstream's build-appimage depends on.
+    # Pinned to 22.04 for glibc 2.35 -- this is the AppImage's compatibility
+    # floor. Do NOT bump to 24.04 (glibc 2.39): the binary would refuse to
+    # start on any SteamOS below that. Image deprecation starts 2026-09-17
+    # (brownout windows) and it is unsupported after 2027-04-17; the fix at
+    # that point is `container: ubuntu:22.04`, not a runner bump.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang-15 lld-15 cmake ninja-build nasm pkg-config \
+            autoconf automake libtool-bin python3 zip unzip \
+            freeglut3-dev libgcrypt20-dev libglm-dev libgtk-3-dev \
+            libpulse-dev libsecret-1-dev libsystemd-dev libudev-dev \
+            libbluetooth-dev appstream file desktop-file-utils patchelf \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxinerama-dev libxkbcommon-dev libwayland-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libglu1-mesa-dev
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-jammy-clang15-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: vcpkg-jammy-clang15-
+
+      - name: Bootstrap vcpkg
+        run: |
+          mkdir -p "${VCPKG_DEFAULT_BINARY_CACHE}"
+          bash ./dependencies/vcpkg/bootstrap-vcpkg.sh
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=release \
+            -DCMAKE_C_COMPILER=/usr/bin/clang-15 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/clang++-15 \
+            -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
+
+      - name: Build Cemu
+        run: cmake --build build
+
+      - name: Stage binary
+        run: mv bin/Cemu_release bin/Cemu
+
+      - name: Build AppImage
+        env:
+          DEPLOY_GTK_VERSION: 3
+          LD_LIBRARY_PATH: /usr/local/lib
+        run: |
+          chmod +x dist/linux/appimage.sh
+          dist/linux/appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: cemu-toypad-appimage-x64
+          path: artifacts/*.AppImage
+          if-no-files-found: error
+          retention-days: 30
