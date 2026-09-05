@@ -38,8 +38,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 0
+
+      - name: Fetch pinned dependencies
+        # This fork's .gitmodules declares five submodules, but the commit tree
+        # contains no gitlink (160000) entries for any of them -- so
+        # `submodules: recursive` silently does nothing and the build dies at
+        # bootstrap-vcpkg.sh with exit 127. SHAs below are upstream
+        # cemu-project/Cemu v2.6's pinned commits. The vcpkg SHA matches
+        # builtin-baseline in vcpkg.json, which is what confirms the base tag.
+        run: |
+          set -euo pipefail
+          fetch_dep() {
+            local path="$1" url="$2" sha="$3"
+            echo "::group::${path} @ ${sha}"
+            rm -rf "${path}"
+            git clone --filter=blob:none --no-checkout "${url}" "${path}"
+            git -C "${path}" checkout --detach "${sha}"
+            # cubeb and ZArchive carry nested submodules of their own.
+            git -C "${path}" submodule update --init --recursive --depth 1
+            echo "::endgroup::"
+          }
+          fetch_dep dependencies/vcpkg \
+            https://github.com/microsoft/vcpkg \
+            a4275b7eee79fb24ec2e135481ef5fce8b41c339
+          fetch_dep dependencies/cubeb \
+            https://github.com/mozilla/cubeb \
+            2071354a69aca7ed6df3b4222e305746c2113f60
+          fetch_dep dependencies/ZArchive \
+            https://github.com/Exzap/ZArchive \
+            d2c717730092c7bf8cbb033b12fd4001b7c4d932
+          fetch_dep dependencies/Vulkan-Headers \
+            https://github.com/KhronosGroup/Vulkan-Headers \
+            9b9fd871b08110cd8f0b74e721b03213d9cc3081
+          fetch_dep dependencies/imgui \
+            https://github.com/ocornut/imgui \
+            f65bcf481ab34cd07d3909aab1479f409fa79f2f
+          test -f dependencies/vcpkg/bootstrap-vcpkg.sh \
+            || { echo "::error::vcpkg bootstrap still missing"; exit 1; }
 
       - name: Install system dependencies
         run: |
