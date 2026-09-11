@@ -823,17 +823,67 @@ namespace nsyshid
 	{
 		std::lock_guard lock(m_dimensionsMutex);
 
-		const uint32 id = GetFigureId(buf);
+		std::array<uint8, 0x2D * 0x04> data = buf;
+
+		// A real physical figure's NFC UID is unique per tag even when several tags represent
+		// the same character. A companion app can only ever send back the one fixed dump it
+		// has for a given character, so loading a second copy of an already-active character
+		// sends an identical UID - which reports the same UID as newly added at a different
+		// pad/index without ever being removed from the first, a state that can't happen with
+		// real hardware. The game can't make sense of that and drops the second figure. If the
+		// incoming UID collides with a figure already occupying another slot, mint it a fresh
+		// random UID and re-key the pages that are encrypted with it (character id, password),
+		// exactly like CreateFigure does when it mints a brand new custom tag.
+		const auto uidOf = [](const std::array<uint8, 0x2D * 0x04>& d) -> std::array<uint8, 7> {
+			return {d[0], d[1], d[2], d[4], d[5], d[6], d[7]};
+		};
+		bool collides = false;
+		for (uint8 i = 0; i < m_figures.size(); i++)
+		{
+			const DimensionsMini& other = m_figures[i];
+			if (i == index || other.pad == 255)
+				continue;
+			if (uidOf(other.data) == uidOf(data))
+			{
+				collides = true;
+				break;
+			}
+		}
+
+		if (collides)
+		{
+			const uint32 figNum = GetFigureId(data);
+			RandomUID(data);
+			// Characters have their model number encrypted in page 36 using a key derived
+			// from the UID; vehicles/gadgets store it as plain little-endian bytes there
+			// instead (see GetFigureId) and don't need re-encrypting.
+			if (figNum < 1000)
+			{
+				const std::array<uint8, 16> figureKey = GenerateFigureKey(data);
+				const std::array<uint8, 8> valueToEncrypt = {uint8(figNum & 0xFF), uint8((figNum >> 8) & 0xFF),
+															  uint8((figNum >> 16) & 0xFF), uint8((figNum >> 24) & 0xFF),
+															  uint8(figNum & 0xFF), uint8((figNum >> 8) & 0xFF),
+															  uint8((figNum >> 16) & 0xFF), uint8((figNum >> 24) & 0xFF)};
+				const std::array<uint8, 8> encrypted = Encrypt(valueToEncrypt, figureKey);
+				std::memcpy(&data[36 * 4], &encrypted[0], 4);
+				std::memcpy(&data[37 * 4], &encrypted[4], 4);
+			}
+			std::memcpy(&data[43 * 4], PWDGenerate(data).data(), 4);
+		}
+
+		const uint32 id = GetFigureId(data);
 
 		DimensionsMini& figure = GetFigureByIndex(index);
 		figure.dimFile = std::move(file);
 		figure.id = id;
 		figure.pad = pad;
 		figure.index = index + 1;
-		figure.data = buf;
+		figure.data = data;
+		if (collides)
+			figure.Save(); // persist the freshly minted UID/keys to the staged .bin file
 		// When a figure is added to the toypad, respond to the game with the pad they were added to, their index,
 		// the direction (0x00 in byte 6 for added) and their UID
-		std::array<uint8, 32> figureChangeResponse = {0x56, 0x0b, figure.pad, 0x00, figure.index, 0x00, buf[0], buf[1], buf[2], buf[4], buf[5], buf[6], buf[7]};
+		std::array<uint8, 32> figureChangeResponse = {0x56, 0x0b, figure.pad, 0x00, figure.index, 0x00, data[0], data[1], data[2], data[4], data[5], data[6], data[7]};
 		figureChangeResponse[13] = GenerateChecksum(figureChangeResponse, 13);
 		m_figureAddedRemovedResponses.push(figureChangeResponse);
 
